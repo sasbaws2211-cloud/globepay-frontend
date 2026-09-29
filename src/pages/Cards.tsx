@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   getCards,
+  getCardLimits,
   createCard,
   fundCard,
   freezeCard,
@@ -13,10 +14,13 @@ import {
   retryCardFunding,
   refundCardFunding,
   type CardFunding,
+  type CardLimits,
   type CardTransaction,
 } from '../api/services';
 import type { Card } from '../api/types';
 import { getErrorMessage } from '../api/client';
+import { openPaystackCheckout } from '../api/paystack';
+import { describeSettledPayment, usePaymentTracker } from '../hooks/usePaymentTracker';
 import { useAuth } from '../context/AuthContext';
 
 export default function Cards() {
@@ -60,6 +64,14 @@ export default function Cards() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Lite-card rules come from the backend so the form can't drift from what
+  // Bitnob will actually accept. Until they load, assume top-ups are off.
+  const [limits, setLimits] = useState<CardLimits | null>(null);
+  useEffect(() => {
+    getCardLimits().then(setLimits).catch(() => {});
+  }, []);
+  const canTopUp = limits?.can_top_up === true;
 
   const toggleFundings = async (cardId: string) => {
     if (expandedCardId === cardId) {
@@ -108,17 +120,37 @@ export default function Cards() {
     }
   };
 
+  const { track, tracking } = usePaymentTracker((result) => {
+    const { ok, message } = describeSettledPayment(result);
+    if (ok) {
+      setError('');
+      setSuccess(`${message} ${result.kind === 'card_funding' ? 'Your card has been topped up.' : 'Your card is being set up.'}`);
+    } else {
+      setSuccess('');
+      setError(message);
+    }
+    load();
+  });
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError('');
     try {
       const res = await createCard(createForm);
-      setSuccess(`Card creation started. Ref: ${res.reference}`);
-      if (res.authorization_url) window.open(res.authorization_url, '_blank');
       setShowCreate(false);
+      const result = await openPaystackCheckout(res.authorization_url);
+      setSuccess(
+        result === 'success'
+          ? 'Payment received - confirming with Paystack…'
+          : `Checkout closed before paying. Ref: ${res.reference}`
+      );
+      track(res.reference);
       load();
     } catch (err) {
+      // Close the modal so the reason (e.g. card limit reached) isn't hidden behind it.
+      setShowCreate(false);
+      setSuccess('');
       setError(getErrorMessage(err));
     } finally {
       setBusy(false);
@@ -132,11 +164,20 @@ export default function Cards() {
     setError('');
     try {
       const res = await fundCard(fundCardId, fundForm.amount_ghs, fundForm.sender_email);
-      setSuccess(`Funding started. Ref: ${res.reference}`);
-      if (res.authorization_url) window.open(res.authorization_url, '_blank');
       setFundCardId(null);
+      const result = await openPaystackCheckout(res.authorization_url);
+      setSuccess(
+        result === 'success'
+          ? 'Payment received - confirming with Paystack…'
+          : `Checkout closed before paying. Ref: ${res.reference}`
+      );
+      track(res.reference);
       load();
     } catch (err) {
+      // Close the modal so the reason (e.g. "lite cards can't be topped up")
+      // isn't hidden behind it - the page-level alert sits under the overlay.
+      setFundCardId(null);
+      setSuccess('');
       setError(getErrorMessage(err));
     } finally {
       setBusy(false);
@@ -184,6 +225,7 @@ export default function Cards() {
       <div className="page-header">
         <h1>Virtual Cards</h1>
         <div className="btn-group">
+          {tracking && <span className="text-muted" style={{ alignSelf: 'center', fontSize: '0.85rem' }}>Updating…</span>}
           <button className="btn btn-outline" onClick={load}>Refresh</button>
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>Create card</button>
         </div>
@@ -214,9 +256,12 @@ export default function Cards() {
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
-                <span style={{ opacity: 0.9 }}>{c.card_brand || 'GlobePay Card'}</span>
+                <span style={{ opacity: 0.9 }}>
+                  {c.card_brand || 'GlobePay Card'}
+                  <span style={{ opacity: 0.7, fontSize: '0.75rem', marginLeft: '0.4rem' }}>· Lite</span>
+                </span>
                 <span className="badge" style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}>
-                  {c.status}
+                  {c.status.replaceAll('_', ' ')}
                 </span>
               </div>
               <div style={{ fontFamily: 'monospace', fontSize: '1.2rem', letterSpacing: 3, marginBottom: '1rem' }}>
@@ -229,26 +274,33 @@ export default function Cards() {
                 </div>
               </div>
               <div className="btn-group">
-                <button
-                  className="btn btn-sm"
-                  style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}
-                  onClick={() => {
-                    setFundCardId(c.id);
-                    setFundForm({ amount_ghs: '20', sender_email: user?.email || '' });
-                  }}
-                  disabled={['terminated', 'failed'].includes((c.status || '').toLowerCase())}
-                >
-                  Fund
-                </button>
-                <button
-                  className="btn btn-sm"
-                  style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}
-                  onClick={() => handleFreeze(c)}
-                  disabled={busy || ['terminated', 'failed'].includes((c.status || '').toLowerCase())}
-                >
-                  {c.status === 'frozen' || c.status === 'inactive' ? 'Unfreeze' : 'Freeze'}
-                </button>
-                {!['terminated', 'failed'].includes((c.status || '').toLowerCase()) && (
+                {/* Statuses match backend CardStatus: only a card that exists on
+                    Bitnob (active/frozen) can be funded/frozen/terminated; a paid
+                    card whose creation failed (delivery_failed) can only be
+                    retried or refunded. */}
+                {c.status === 'active' && canTopUp && (
+                  <button
+                    className="btn btn-sm"
+                    style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}
+                    onClick={() => {
+                      setFundCardId(c.id);
+                      setFundForm({ amount_ghs: '20', sender_email: user?.email || '' });
+                    }}
+                  >
+                    Fund
+                  </button>
+                )}
+                {['active', 'frozen'].includes(c.status) && (
+                  <button
+                    className="btn btn-sm"
+                    style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}
+                    onClick={() => handleFreeze(c)}
+                    disabled={busy}
+                  >
+                    {c.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
+                  </button>
+                )}
+                {['active', 'frozen'].includes(c.status) && (
                   <button
                     className="btn btn-sm"
                     style={{ background: 'rgba(220,38,38,0.35)', color: 'white' }}
@@ -261,7 +313,7 @@ export default function Cards() {
                     Terminate
                   </button>
                 )}
-                {['failed', 'pending'].includes((c.status || '').toLowerCase()) && (
+                {c.status === 'delivery_failed' && (
                   <button
                     className="btn btn-sm"
                     style={{ background: 'rgba(255,255,255,0.25)', color: 'white' }}
@@ -283,7 +335,7 @@ export default function Cards() {
                     Retry
                   </button>
                 )}
-                {['failed'].includes((c.status || '').toLowerCase()) && (
+                {c.status === 'delivery_failed' && (
                   <button
                     className="btn btn-sm"
                     style={{ background: 'rgba(255,255,255,0.25)', color: 'white' }}
@@ -367,7 +419,8 @@ export default function Cards() {
                                 <td>
                                   {canAct && (
                                     <div className="btn-group">
-                                      <button
+                                      {/* A lite card can't take a top-up, so a retry always fails - only Refund helps. */}
+                                      {canTopUp && <button
                                         className="btn btn-sm"
                                         style={{ background: 'rgba(255,255,255,0.25)', color: 'white' }}
                                         disabled={busy}
@@ -385,7 +438,7 @@ export default function Cards() {
                                         }}
                                       >
                                         Retry
-                                      </button>
+                                      </button>}
                                       <button
                                         className="btn btn-sm"
                                         style={{ background: 'rgba(220,38,38,0.4)', color: 'white' }}
@@ -485,10 +538,29 @@ export default function Cards() {
         <div className="modal-overlay" onClick={() => setShowCreate(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2>Create virtual card</h2>
+            <div className="alert" style={{ background: '#f0fdfa', border: '1px solid #99f6e4', color: '#134e4a', fontSize: '0.85rem', marginBottom: '1rem' }}>
+              This is a <strong>lite card</strong>: you load it <strong>once</strong>, now, and it can't be topped up later.
+              Spend it online, then create a new card when you need more.
+              {limits && (
+                <>
+                  {' '}Load between GHS {parseFloat(limits.min_load_ghs).toFixed(2)} and GHS{' '}
+                  {parseFloat(limits.max_load_ghs).toFixed(2)} (${parseFloat(limits.max_load_usd).toFixed(0)}). Up to{' '}
+                  {limits.max_cards_per_phone} cards per phone number.
+                </>
+              )}
+            </div>
             <form onSubmit={handleCreate}>
               <div className="form-group">
-                <label>Initial funding (GHS)</label>
-                <input required type="number" step="0.01" min="10" value={createForm.initial_funding_ghs} onChange={(e) => setCreateForm({ ...createForm, initial_funding_ghs: e.target.value })} />
+                <label>Card load (GHS) - one time</label>
+                <input
+                  required
+                  type="number"
+                  step="0.01"
+                  min={limits?.min_load_ghs ?? '10'}
+                  max={limits?.max_load_ghs}
+                  value={createForm.initial_funding_ghs}
+                  onChange={(e) => setCreateForm({ ...createForm, initial_funding_ghs: e.target.value })}
+                />
               </div>
               <div className="form-group">
                 <label>Email (Paystack)</label>

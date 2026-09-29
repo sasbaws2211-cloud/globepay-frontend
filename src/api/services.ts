@@ -49,10 +49,29 @@ export async function sendMoney(payload: {
   amount: number | string;
   note?: string;
   sender_email: string;
-}): Promise<AuthUrlResponse> {
+}, idempotencyKey?: string): Promise<AuthUrlResponse> {
   const res = await api.post<AuthUrlResponse>('/wallet/transfers', payload, {
-    headers: { 'Idempotency-Key': generateIdempotencyKey() },
+    headers: { 'Idempotency-Key': idempotencyKey || generateIdempotencyKey() },
   });
+  return res.data;
+}
+
+/** Asks the backend to check Paystack for this transfer's payment/payout and
+ * returns its (possibly updated) state - polled while a transfer is in flight. */
+export async function refreshTransfer(transferId: string): Promise<Transfer> {
+  const res = await api.post<Transfer>(`/wallet/transfers/${transferId}/refresh`);
+  return res.data;
+}
+
+export interface PaymentRefresh {
+  kind: 'vault_contribution' | 'splitbill_share' | 'crossborder_transfer' | 'card_creation' | 'card_funding';
+  status: string;
+  pending: boolean;
+}
+
+/** Same idea as refreshTransfer, for every other kind of checkout, looked up by its payment reference. */
+export async function refreshPayment(reference: string): Promise<PaymentRefresh> {
+  const res = await api.post<PaymentRefresh>(`/payments/${encodeURIComponent(reference)}/refresh`);
   return res.data;
 }
 
@@ -122,6 +141,22 @@ export async function cancelVault(vaultId: string): Promise<Vault> {
 }
 
 // ─── Cards ──────────────────────────────────────────────────────────────────
+export interface CardLimits {
+  card_type: string; // "lite" - the only card type GlobePay issues
+  can_top_up: boolean; // false for lite cards: loaded once, at creation
+  min_load_ghs: string;
+  max_load_ghs: string;
+  min_load_usd: string;
+  max_load_usd: string;
+  max_cards_per_phone: number;
+  creation_fee_usd: string;
+}
+
+export async function getCardLimits(): Promise<CardLimits> {
+  const res = await api.get<CardLimits>('/cards/limits');
+  return res.data;
+}
+
 export async function getCards(): Promise<Card[]> {
   const res = await api.get<Card[]>('/cards');
   return res.data;
@@ -442,6 +477,11 @@ export async function getSplitBill(splitBillId: string): Promise<SplitBill> {
 
 export async function cancelSplitBill(splitBillId: string): Promise<SplitBill> {
   const res = await api.post<SplitBill>(`/splits/${splitBillId}/cancel`);
+  return res.data;
+}
+
+export async function retrySplitSharePayout(splitBillId: string, shareId: string) {
+  const res = await api.post(`/splits/${splitBillId}/shares/${shareId}/retry-payout`);
   return res.data;
 }
 

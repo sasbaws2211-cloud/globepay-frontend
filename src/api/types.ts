@@ -103,6 +103,7 @@ export interface SplitBill {
     user_id: string;
     gross_amount: string;
     status: string;
+    payout_status?: string;
     created_at: string;
     paid_at: string | null;
   }[];
@@ -111,4 +112,5 @@ export interface SplitBill {
 export interface AuthUrlResponse {
   authorization_url: string;
   reference: string;
+  transfer_id?: string | null; // wallet transfers only
 }

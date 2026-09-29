@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { getCrossBorderTransfers, createCrossBorderTransfer, retryCrossBorderTransfer, refundCrossBorderTransfer } from '../api/services';
 import type { CrossBorderTransfer } from '../api/types';
 import { getErrorMessage } from '../api/client';
+import { openPaystackCheckout } from '../api/paystack';
+import { describeSettledPayment, usePaymentTracker } from '../hooks/usePaymentTracker';
 import { useAuth } from '../context/AuthContext';
 
 function formatGhs(value: string | number) {
@@ -24,7 +26,7 @@ export default function CrossBorder() {
     destination_currency: 'KES',
     beneficiary_name: '',
     beneficiary_phone: '',
-    network: 'M-Pesa',
+    network: 'MPESA', // Bitnob network code - "M-Pesa" is rejected at delivery
     sender_email: user?.email || '',
   });
 
@@ -44,6 +46,18 @@ export default function CrossBorder() {
     load();
   }, [load]);
 
+  const { track, tracking } = usePaymentTracker((result) => {
+    const { ok, message } = describeSettledPayment(result);
+    if (ok) {
+      setError('');
+      setSuccess(`${message} Your transfer is on its way.`);
+    } else {
+      setSuccess('');
+      setError(message);
+    }
+    load();
+  });
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -61,9 +75,14 @@ export default function CrossBorder() {
         },
         sender_email: form.sender_email,
       });
-      setSuccess(`Transfer initiated. Ref: ${res.reference}`);
-      if (res.authorization_url) window.open(res.authorization_url, '_blank');
       setShowForm(false);
+      const result = await openPaystackCheckout(res.authorization_url);
+      setSuccess(
+        result === 'success'
+          ? 'Payment received - confirming with Paystack…'
+          : `Checkout closed before paying. Ref: ${res.reference}`
+      );
+      track(res.reference);
       load();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -77,6 +96,7 @@ export default function CrossBorder() {
       <div className="page-header">
         <h1>Go Global</h1>
         <div className="btn-group">
+          {tracking && <span className="text-muted" style={{ alignSelf: 'center', fontSize: '0.85rem' }}>Updating…</span>}
           <button className="btn btn-outline" onClick={load}>Refresh</button>
           <button className="btn btn-primary" onClick={() => setShowForm(true)}>New transfer</button>
         </div>
@@ -111,8 +131,11 @@ export default function CrossBorder() {
               <tbody>
                 {transfers.map((t) => {
                   const st = (t.status || '').toLowerCase();
-                  const canRetry = ['failed', 'delivery_failed', 'pending'].includes(st);
-                  const canRefund = ['failed', 'delivery_failed'].includes(st);
+                  // Matches backend CrossBorderStatus: only delivery_failed means "paid but
+                  // not delivered". 'failed' = the payment itself never went through, so
+                  // there's nothing to retry or refund; refund_pending = refund in progress.
+                  const canRetry = st === 'delivery_failed';
+                  const canRefund = st === 'delivery_failed';
                   return (
                   <tr key={t.id}>
                     <td>{formatGhs(t.source_amount)}</td>
@@ -124,8 +147,8 @@ export default function CrossBorder() {
                     </td>
                     <td>{t.exchange_rate_used || '—'}</td>
                     <td>
-                      <span className={`badge badge-${st === 'completed' ? 'success' : st === 'failed' || st === 'delivery_failed' ? 'failed' : 'pending'}`}>
-                        {t.status}
+                      <span className={`badge badge-${['completed', 'refunded'].includes(st) ? 'success' : st === 'failed' || st === 'delivery_failed' ? 'failed' : 'pending'}`}>
+                        {t.status.replaceAll('_', ' ')}
                       </span>
                       {t.failure_reason && (
                         <div style={{ fontSize: '0.75rem', color: 'var(--danger)' }}>{t.failure_reason}</div>
@@ -219,7 +242,11 @@ export default function CrossBorder() {
               </div>
               <div className="form-group">
                 <label>Network</label>
-                <input value={form.network} onChange={(e) => setForm({ ...form, network: e.target.value })} />
+                <input
+                  value={form.network}
+                  placeholder="e.g. MPESA, MTN, AIRTEL"
+                  onChange={(e) => setForm({ ...form, network: e.target.value })}
+                />
               </div>
               <div className="form-group">
                 <label>Your email (Paystack)</label>

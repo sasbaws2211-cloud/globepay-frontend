@@ -13,6 +13,8 @@ import {
 } from '../api/services';
 import type { Vault } from '../api/types';
 import { getErrorMessage } from '../api/client';
+import { openPaystackCheckout } from '../api/paystack';
+import { describeSettledPayment, usePaymentTracker } from '../hooks/usePaymentTracker';
 import { useAuth } from '../context/AuthContext';
 
 function formatGhs(value: string | number) {
@@ -61,6 +63,18 @@ export default function Vaults() {
     load();
   }, [load]);
 
+  const { track, tracking } = usePaymentTracker((result) => {
+    const { ok, message } = describeSettledPayment(result);
+    if (ok) {
+      setError('');
+      setSuccess(`${message} Your vault balance has been updated.`);
+    } else {
+      setSuccess('');
+      setError(message);
+    }
+    load();
+  });
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -90,10 +104,15 @@ export default function Vaults() {
     setError('');
     try {
       const res = await contributeToVault(actionVault.id, contribForm.amount, contribForm.email);
-      setSuccess(`Contribution started. Ref: ${res.reference}`);
-      if (res.authorization_url) window.open(res.authorization_url, '_blank');
       setActionVault(null);
       setActionType(null);
+      const result = await openPaystackCheckout(res.authorization_url);
+      setSuccess(
+        result === 'success'
+          ? 'Payment received - confirming with Paystack…'
+          : `Checkout closed before paying. Ref: ${res.reference}`
+      );
+      track(res.reference);
       load();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -166,6 +185,7 @@ export default function Vaults() {
       <div className="page-header">
         <h1>Savings Vaults</h1>
         <div className="btn-group">
+          {tracking && <span className="text-muted" style={{ alignSelf: 'center', fontSize: '0.85rem' }}>Updating…</span>}
           <button className="btn btn-outline" onClick={load}>Refresh</button>
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>New vault</button>
         </div>

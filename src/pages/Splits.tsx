@@ -5,9 +5,12 @@ import {
   getSplitBill,
   cancelSplitBill,
   paySplitShare,
+  retrySplitSharePayout,
 } from '../api/services';
 import type { SplitBill } from '../api/types';
 import { getErrorMessage } from '../api/client';
+import { openPaystackCheckout } from '../api/paystack';
+import { describeSettledPayment, usePaymentTracker } from '../hooks/usePaymentTracker';
 import { useAuth } from '../context/AuthContext';
 
 function formatGhs(value: string | number) {
@@ -103,6 +106,18 @@ export default function Splits() {
     load();
   }, [load]);
 
+  const { track, tracking } = usePaymentTracker((result) => {
+    const { ok, message } = describeSettledPayment(result);
+    if (ok) {
+      setError('');
+      setSuccess(`${message} Your share is marked paid.`);
+    } else {
+      setSuccess('');
+      setError(message);
+    }
+    load();
+  });
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -162,14 +177,33 @@ export default function Splits() {
     }
   };
 
+  const handleRetryPayout = async (bill: SplitBill, shareId: string) => {
+    setBusy(true);
+    setError('');
+    try {
+      await retrySplitSharePayout(bill.id, shareId);
+      setSuccess('Payout re-sent');
+      load();
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handlePay = async (splitBillId: string) => {
     setBusy(true);
     setError('');
     try {
       const res = await paySplitShare(splitBillId, payEmail.trim() || user?.email || '');
-      setSuccess(`Payment started. Ref: ${res.reference}`);
-      if (res.authorization_url) window.open(res.authorization_url, '_blank');
       setPayingId(null);
+      const result = await openPaystackCheckout(res.authorization_url);
+      setSuccess(
+        result === 'success'
+          ? 'Payment received - confirming with Paystack…'
+          : `Checkout closed before paying. Ref: ${res.reference}`
+      );
+      track(res.reference);
       load();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -183,6 +217,7 @@ export default function Splits() {
       <div className="page-header">
         <h1>Split Bills</h1>
         <div className="btn-group">
+          {tracking && <span className="text-muted" style={{ alignSelf: 'center', fontSize: '0.85rem' }}>Updating…</span>}
           <button className="btn btn-outline" onClick={load}>
             Refresh
           </button>
@@ -315,8 +350,20 @@ export default function Splits() {
                         style={{ display: 'flex', justifyContent: 'space-between', padding: '0.25rem 0' }}
                       >
                         <span>{formatGhs(s.gross_amount)}</span>
-                        <span className={`badge badge-${s.status === 'paid' ? 'success' : 'pending'}`}>
-                          {s.status}
+                        <span style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
+                          <span className={`badge badge-${s.status === 'paid' ? 'success' : 'pending'}`}>
+                            {s.status}
+                          </span>
+                          {isOrganizer && s.status === 'paid' && s.payout_status && s.payout_status !== 'completed' && (
+                            <span className={`badge badge-${s.payout_status === 'failed' ? 'failed' : 'pending'}`}>
+                              payout {s.payout_status.replaceAll('_', ' ')}
+                            </span>
+                          )}
+                          {isOrganizer && s.payout_status === 'failed' && (
+                            <button className="btn btn-sm btn-outline" disabled={busy} onClick={() => handleRetryPayout(b, s.id)}>
+                              Retry payout
+                            </button>
+                          )}
                         </span>
                       </li>
                     ))}
