@@ -150,7 +150,8 @@ export default function Settings() {
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
-      {limits && (
+      {/* Only while the server enforces limits - otherwise there's nothing to show. */}
+      {limits?.enforced && (
         <div className="card" style={{ marginBottom: '1rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '0.75rem' }}>
             <h2 style={{ fontSize: '1.1rem' }}>Your transaction limits</h2>
@@ -160,6 +161,15 @@ export default function Settings() {
             ['Today (last 24 hours)', limits.daily_used, limits.daily_limit],
             ['This month (last 30 days)', limits.monthly_used, limits.monthly_limit],
           ] as const).map(([label, used, max]) => {
+            // No limit at this tier: show what's been used, no bar.
+            if (max === null) {
+              return (
+                <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
+                  <span>{label}</span>
+                  <span>{ghs(used)} used · <strong>No limit</strong></span>
+                </div>
+              );
+            }
             const pct = Math.min(100, (parseFloat(used) / parseFloat(max)) * 100);
             return (
               <div key={label} style={{ marginBottom: '0.75rem' }}>

@@ -40,13 +40,14 @@ export async function getMe(): Promise<User> {
 // Verification tier and how much of its daily/monthly limit is used
 // (confirmed payments in, plus checkouts started in the last 30 minutes).
 export interface TransactionLimits {
+  enforced: boolean; // false = limits switched off server-side; nothing is refused
   kyc_tier: 'unverified' | 'phone_verified' | 'id_verified';
-  daily_limit: string;
+  daily_limit: string | null; // null = no daily limit at this tier
   daily_used: string;
-  daily_remaining: string;
-  monthly_limit: string;
+  daily_remaining: string | null;
+  monthly_limit: string | null; // null = no monthly limit at this tier
   monthly_used: string;
-  monthly_remaining: string;
+  monthly_remaining: string | null;
 }
 
 export async function getMyLimits(): Promise<TransactionLimits> {
