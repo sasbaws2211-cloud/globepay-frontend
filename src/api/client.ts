@@ -33,7 +33,10 @@ export function getErrorMessage(err: unknown): string {
     const detail = ax.response?.data?.detail;
     if (typeof detail === 'string') return detail;
     if (Array.isArray(detail) && detail.length > 0) {
-      return detail.map((d) => (typeof d === 'object' && d.msg ? d.msg : String(d))).join(', ');
+      // Pydantic prefixes custom validator messages with "Value error, " - strip it for people.
+      return detail
+        .map((d) => (typeof d === 'object' && d.msg ? d.msg : String(d)).replace(/^Value error, /, ''))
+        .join(', ');
     }
     return ax.message || 'Request failed';
   }

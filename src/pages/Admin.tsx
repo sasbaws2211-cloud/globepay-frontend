@@ -3,9 +3,6 @@ import {
   getAdminStats,
   getAdminUsers,
   setAdminUserStatus,
-  getPendingKyc,
-  approveKyc,
-  rejectKyc,
   getStuckTransactions,
   getAuditLog,
   adminRetryCrossBorder,
@@ -17,13 +14,11 @@ import {
   type StuckTransaction,
   type AuditLogEntry,
 } from '../api/services';
-import type { User } from '../api/types';
 import { getErrorMessage } from '../api/client';
 
 export default function Admin() {
   const [stats, setStats] = useState<PlatformStats | null>(null);
   const [users, setUsers] = useState<AdminUserSummary[]>([]);
-  const [pendingKyc, setPendingKyc] = useState<User[]>([]);
   const [stuck, setStuck] = useState<StuckTransaction[]>([]);
   const [audit, setAudit] = useState<AuditLogEntry[]>([]);
   const [query, setQuery] = useState('');
@@ -32,23 +27,20 @@ export default function Admin() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [busy, setBusy] = useState(false);
-  const [rejectReason, setRejectReason] = useState<Record<string, string>>({});
   const [tab, setTab] = useState<'overview' | 'users' | 'kyc' | 'stuck' | 'audit'>('overview');
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [s, u, k, st, a] = await Promise.all([
+      const [s, u, st, a] = await Promise.all([
         getAdminStats(),
         getAdminUsers(),
-        getPendingKyc(),
         getStuckTransactions(),
         getAuditLog(),
       ]);
       setStats(s);
       setUsers(u);
-      setPendingKyc(k);
       setStuck(st);
       setAudit(a);
       setForbidden(false);
@@ -229,73 +221,7 @@ export default function Admin() {
         </div>
       )}
 
-      {tab === 'kyc' && (
-        <div className="card">
-          {pendingKyc.length === 0 ? (
-            <div className="empty-state">
-              <p>No pending KYC submissions.</p>
-            </div>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Phone</th>
-                    <th>Tier / status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pendingKyc.map((u) => (
-                    <tr key={u.id}>
-                      <td>{u.full_name}</td>
-                      <td>{u.phone_number}</td>
-                      <td>
-                        {u.kyc_tier} / {u.kyc_status}
-                      </td>
-                      <td>
-                        <div className="btn-group">
-                          <button
-                            className="btn btn-sm btn-primary"
-                            disabled={busy}
-                            onClick={() =>
-                              run(async () => {
-                                await approveKyc(u.id);
-                              }, 'KYC approved')
-                            }
-                          >
-                            Approve
-                          </button>
-                          <input
-                            style={{ width: 140, padding: '0.3rem 0.5rem', borderRadius: 6, border: '1px solid #99f6e4' }}
-                            placeholder="Reject reason"
-                            value={rejectReason[u.id] || ''}
-                            onChange={(e) =>
-                              setRejectReason({ ...rejectReason, [u.id]: e.target.value })
-                            }
-                          />
-                          <button
-                            className="btn btn-sm btn-danger"
-                            disabled={busy}
-                            onClick={() =>
-                              run(async () => {
-                                await rejectKyc(u.id, rejectReason[u.id] || 'Rejected by admin');
-                              }, 'KYC rejected')
-                            }
-                          >
-                            Reject
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
+     
 
       {tab === 'stuck' && (
         <div className="card">

@@ -4,9 +4,13 @@ import type {
   Token,
   WalletSummary,
   Transfer,
+  TransferQuote,
   Vault,
   Card,
   CrossBorderTransfer,
+  PayoutAmountLimits,
+  PayoutCorridorCountry,
+  PayoutRequirements,
   SplitBill,
   AuthUrlResponse,
 } from './types';
@@ -33,6 +37,23 @@ export async function getMe(): Promise<User> {
   return res.data;
 }
 
+// Verification tier and how much of its daily/monthly limit is used
+// (confirmed payments in, plus checkouts started in the last 30 minutes).
+export interface TransactionLimits {
+  kyc_tier: 'unverified' | 'phone_verified' | 'id_verified';
+  daily_limit: string;
+  daily_used: string;
+  daily_remaining: string;
+  monthly_limit: string;
+  monthly_used: string;
+  monthly_remaining: string;
+}
+
+export async function getMyLimits(): Promise<TransactionLimits> {
+  const res = await api.get<TransactionLimits>('/auth/me/limits');
+  return res.data;
+}
+
 // ─── Wallet ─────────────────────────────────────────────────────────────────
 export async function getWalletSummary(): Promise<WalletSummary> {
   const res = await api.get<WalletSummary>('/wallet/summary');
@@ -56,6 +77,12 @@ export async function sendMoney(payload: {
   return res.data;
 }
 
+/** Review step before paying: recipient, fee, what they get, round-up and total. Creates nothing. */
+export async function quoteTransfer(payload: { recipient_phone_number: string; amount: string }): Promise<TransferQuote> {
+  const res = await api.post<TransferQuote>('/wallet/transfers/quote', payload);
+  return res.data;
+}
+
 /** Asks the backend to check Paystack for this transfer's payment/payout and
  * returns its (possibly updated) state - polled while a transfer is in flight. */
 export async function refreshTransfer(transferId: string): Promise<Transfer> {
@@ -64,7 +91,7 @@ export async function refreshTransfer(transferId: string): Promise<Transfer> {
 }
 
 export interface PaymentRefresh {
-  kind: 'vault_contribution' | 'splitbill_share' | 'crossborder_transfer' | 'card_creation' | 'card_funding';
+  kind: 'vault_contribution' | 'splitbill_share' | 'crossborder_transfer' | 'card_creation';
   status: string;
   pending: boolean;
 }
@@ -150,6 +177,27 @@ export interface CardLimits {
   max_load_usd: string;
   max_cards_per_phone: number;
   creation_fee_usd: string;
+  ghs_per_usd: string; // also what a terminated card's leftover balance is paid back at
+  fees: { creation_usd: string; funding_flat_usd: string; funding_flat_below_usd: string; funding_percent: string };
+}
+
+// Price of a new card before paying: on the card + Bitnob's fees (passed on) = total.
+export interface CardQuote {
+  amount_ghs: string;
+  amount_usd: string;
+  fee_ghs: string;
+  fee_usd: string;
+  total_ghs: string;
+}
+
+export async function getCardQuote(amount_ghs: string): Promise<CardQuote> {
+  const res = await api.get<CardQuote>('/cards/quote', { params: { amount_ghs } });
+  return res.data;
+}
+
+export async function retryTerminationPayout(cardId: string): Promise<Card> {
+  const res = await api.post<Card>(`/cards/${cardId}/termination-payout/retry`);
+  return res.data;
 }
 
 export async function getCardLimits(): Promise<CardLimits> {
@@ -163,9 +211,9 @@ export async function getCards(): Promise<Card[]> {
 }
 
 export async function createCard(payload: {
-  initial_funding_ghs: number | string;
+  initial_funding_ghs: number | string; // what goes on the card - Bitnob's fees are added on top
   sender_email: string;
-  dial_code: string;
+  dial_code: string; // Bitnob keys lite-card customers by phone
   local_phone_number: string;
 }): Promise<AuthUrlResponse> {
   const res = await api.post<AuthUrlResponse>('/cards', payload, {
@@ -174,16 +222,27 @@ export async function createCard(payload: {
   return res.data;
 }
 
-export async function fundCard(
-  cardId: string,
-  amount_ghs: number | string,
-  sender_email: string
-): Promise<AuthUrlResponse> {
-  const res = await api.post<AuthUrlResponse>(
-    `/cards/${cardId}/fund`,
-    { amount_ghs, sender_email },
-    { headers: { 'Idempotency-Key': generateIdempotencyKey() } }
-  );
+// Full number / expiry / CVV for the owner, after re-entering their password.
+// Keep the result in component state only - never in storage or logs.
+export interface CardDetails {
+  card_number: string;
+  cvv: string;
+  expiry_month: string;
+  expiry_year: string;
+  name: string | null;
+  card_brand: string | null;
+  billing_address: {
+    line1?: string | null;
+    line2?: string | null;
+    city?: string | null;
+    state?: string | null;
+    postal_code?: string | null;
+    country?: string | null;
+  } | null;
+}
+
+export async function revealCardDetails(cardId: string, password: string): Promise<CardDetails> {
+  const res = await api.post<CardDetails>(`/cards/${cardId}/details`, { password });
   return res.data;
 }
 
@@ -203,17 +262,41 @@ export async function getCrossBorderTransfers(): Promise<CrossBorderTransfer[]> 
   return res.data;
 }
 
+export async function getPayoutCorridors(): Promise<PayoutCorridorCountry[]> {
+  const res = await api.get<PayoutCorridorCountry[]>('/crossborder/corridors');
+  return res.data;
+}
+
+export async function getPayoutRequirements(country: string): Promise<PayoutRequirements> {
+  const res = await api.get<PayoutRequirements>(`/crossborder/corridors/${country}`);
+  return res.data;
+}
+
+export async function getPayoutAmountLimits(
+  country: string,
+  currency: string,
+  destinationType: string
+): Promise<PayoutAmountLimits> {
+  const res = await api.get<PayoutAmountLimits>(`/crossborder/corridors/${country}/limits`, {
+    params: { currency, destination_type: destinationType },
+  });
+  return res.data;
+}
+
+export async function getSenderProfile(): Promise<Record<string, string> | null> {
+  const res = await api.get<{ sender: Record<string, string> | null }>('/crossborder/sender-profile');
+  return res.data.sender;
+}
+
 export async function createCrossBorderTransfer(payload: {
   source_amount: number | string;
   destination_country: string;
   destination_currency: string;
-  beneficiary: {
-    destination_type?: string;
-    account_name: string;
-    account_number: string;
-    network: string;
-  };
+  destination_type: string;
+  // Fields exactly as Bitnob's requirements for destination_type define them.
+  beneficiary: Record<string, unknown>;
   sender_email: string;
+  save_sender_profile?: boolean;
 }): Promise<AuthUrlResponse> {
   const res = await api.post<AuthUrlResponse>('/crossborder/transfers', payload, {
     headers: { 'Idempotency-Key': generateIdempotencyKey() },
@@ -249,11 +332,6 @@ export async function requestPhoneVerification(): Promise<{ message: string }> {
 
 export async function confirmPhoneVerification(code: string): Promise<User> {
   const res = await api.post<User>('/auth/verify-phone/confirm', { code });
-  return res.data;
-}
-
-export async function submitKycId(ghana_card_number: string): Promise<User> {
-  const res = await api.post<User>('/auth/kyc/submit-id', { ghana_card_number });
   return res.data;
 }
 
@@ -409,20 +487,6 @@ export async function setAdminUserStatus(userId: string, is_active: boolean): Pr
   return res.data;
 }
 
-export async function getPendingKyc(): Promise<User[]> {
-  const res = await api.get<User[]>('/admin/kyc/pending');
-  return res.data;
-}
-
-export async function approveKyc(userId: string): Promise<User> {
-  const res = await api.post<User>(`/admin/kyc/${userId}/approve`);
-  return res.data;
-}
-
-export async function rejectKyc(userId: string, reason: string): Promise<User> {
-  const res = await api.post<User>(`/admin/kyc/${userId}/reject`, { reason });
-  return res.data;
-}
 
 export async function getStuckTransactions(): Promise<StuckTransaction[]> {
   const res = await api.get<StuckTransaction[]>('/admin/stuck-transactions');
@@ -480,6 +544,21 @@ export async function cancelSplitBill(splitBillId: string): Promise<SplitBill> {
   return res.data;
 }
 
+// Stop collecting: drop what's still owed and make the collected money withdrawable.
+export async function closeSplitBill(splitBillId: string): Promise<SplitBill> {
+  const res = await api.post<SplitBill>(`/splits/${splitBillId}/close`);
+  return res.data;
+}
+
+// Withdraw a settled bill's money (also retries a failed withdrawal).
+export async function withdrawSplitBill(
+  splitBillId: string,
+  payload: { destination: 'momo' | 'vault'; vault_id?: string }
+): Promise<SplitBill> {
+  const res = await api.post<SplitBill>(`/splits/${splitBillId}/withdraw`, payload);
+  return res.data;
+}
+
 export async function retrySplitSharePayout(splitBillId: string, shareId: string) {
   const res = await api.post(`/splits/${splitBillId}/shares/${shareId}/retry-payout`);
   return res.data;
@@ -513,20 +592,7 @@ export async function getCrossBorderTransfer(transferId: string): Promise<CrossB
   return res.data;
 }
 
-// ─── Card funding retry/refund (by id) ──────────────────────────────────────
-export interface CardFunding {
-  id: string;
-  amount_ghs: string;
-  amount_usd: string;
-  status: string;
-  failure_reason: string | null;
-  retry_count: number;
-  refund_reference: string | null;
-  refunded_at: string | null;
-  created_at: string;
-}
-
-
+// ─── Card transaction history ───────────────────────────────────────────────
 export interface CardTransaction {
   id: string;
   card_id: string;
@@ -549,17 +615,3 @@ export async function getCardTransactions(cardId: string): Promise<CardTransacti
   return res.data;
 }
 
-export async function getCardFundings(cardId: string): Promise<CardFunding[]> {
-  const res = await api.get<CardFunding[]>(`/cards/${cardId}/fundings`);
-  return res.data;
-}
-
-export async function retryCardFunding(cardId: string, fundingId: string): Promise<unknown> {
-  const res = await api.post(`/cards/${cardId}/fundings/${fundingId}/retry`);
-  return res.data;
-}
-
-export async function refundCardFunding(cardId: string, fundingId: string): Promise<unknown> {
-  const res = await api.post(`/cards/${cardId}/fundings/${fundingId}/refund`);
-  return res.data;
-}

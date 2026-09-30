@@ -4,24 +4,26 @@ import { useAuth } from '../context/AuthContext';
 import {
   requestPhoneVerification,
   confirmPhoneVerification,
-  submitKycId,
   setPayoutDestination,
   setRoundUpSettings,
   closeAccount,
   getReferrals,
   getVaults,
+  getMyLimits,
+  type TransactionLimits,
 } from '../api/services';
 import type { Vault } from '../api/types';
 import { getErrorMessage } from '../api/client';
+import { MOMO_NETWORKS, toLocalGhanaNumber } from '../utils/momo';
 
-const TIER_LIMITS: Record<string, { daily: string; monthly: string; label: string }> = {
-  unverified: { daily: '500', monthly: '2,000', label: 'Unverified' },
-  phone_verified: { daily: '5,000', monthly: '20,000', label: 'Phone verified' },
-  id_verified: { daily: '20,000', monthly: '100,000', label: 'ID verified' },
+const TIER_LABELS: Record<TransactionLimits['kyc_tier'], string> = {
+  unverified: 'Unverified',
+  phone_verified: 'Phone verified',
+  id_verified: 'ID verified',
 };
 
-function normalizeTier(tier: string | undefined): string {
-  return (tier || 'unverified').toLowerCase();
+function ghs(value: string) {
+  return `GHS ${parseFloat(value).toLocaleString('en-GH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export default function Settings() {
@@ -33,12 +35,11 @@ export default function Settings() {
 
   const [phoneCode, setPhoneCode] = useState('');
   const [codeSent, setCodeSent] = useState(false);
-  const [ghanaCard, setGhanaCard] = useState('');
 
   const [payout, setPayout] = useState({
-    momo_number: user?.default_momo_number || '',
+    momo_number: toLocalGhanaNumber(user?.default_momo_number),
     momo_bank_code: user?.default_momo_bank_code || 'MTN',
-    account_name: user?.full_name || '',
+    account_name: user?.default_account_name || user?.full_name || '',
   });
 
   const [vaults, setVaults] = useState<Vault[]>([]);
@@ -52,16 +53,13 @@ export default function Settings() {
   const [closePassword, setClosePassword] = useState('');
   const [showClose, setShowClose] = useState(false);
 
-  const tierKey = normalizeTier(user?.kyc_tier);
-  const limits = TIER_LIMITS[tierKey] || TIER_LIMITS.unverified;
   const isPhoneVerified = user?.is_phone_verified;
-  const kycStatus = (user?.kyc_status || 'none').toLowerCase();
 
   useEffect(() => {
     setPayout({
-      momo_number: user?.default_momo_number || '',
+      momo_number: toLocalGhanaNumber(user?.default_momo_number),
       momo_bank_code: user?.default_momo_bank_code || 'MTN',
-      account_name: user?.full_name || '',
+      account_name: user?.default_account_name || user?.full_name || '',
     });
     setRoundUpVaultId(user?.round_up_vault_id || '');
     setRoundUpDenom(user?.round_up_denomination || '5.00');
@@ -71,6 +69,12 @@ export default function Settings() {
     getVaults().then(setVaults).catch(() => setVaults([]));
     getReferrals().then(setReferrals).catch(() => setReferrals([]));
   }, []);
+
+  // Re-read after the phone is verified (that raises the tier).
+  const [limits, setLimits] = useState<TransactionLimits | null>(null);
+  useEffect(() => {
+    getMyLimits().then(setLimits).catch(() => setLimits(null));
+  }, [user?.kyc_tier]);
 
   const run = async (fn: () => Promise<void>, okMsg: string) => {
     setBusy(true);
@@ -100,16 +104,7 @@ export default function Settings() {
       await refreshUser();
       setPhoneCode('');
       setCodeSent(false);
-    }, 'Phone verified. Limits raised.');
-  };
-
-  const handleSubmitId = (e: React.FormEvent) => {
-    e.preventDefault();
-    run(async () => {
-      await submitKycId(ghanaCard.trim());
-      await refreshUser();
-      setGhanaCard('');
-    }, 'Ghana Card submitted for verification.');
+    }, 'Phone verified.');
   };
 
   const handlePayout = (e: React.FormEvent) => {
@@ -147,7 +142,7 @@ export default function Settings() {
         <div>
           <h1>Settings</h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
-            Verification, payouts, round-ups, and account
+            Phone, payouts, round-ups, and account
           </p>
         </div>
       </div>
@@ -155,58 +150,44 @@ export default function Settings() {
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <h2 style={{ fontSize: '1.1rem', marginBottom: '1rem' }}>Verification status</h2>
-        <div className="grid grid-3">
-          <div className="stat-card">
-            <div className="stat-label">KYC tier</div>
-            <div className="stat-value" style={{ fontSize: '1.15rem' }}>{limits.label}</div>
+      {limits && (
+        <div className="card" style={{ marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <h2 style={{ fontSize: '1.1rem' }}>Your transaction limits</h2>
+            <span className="badge badge-active" style={{ whiteSpace: 'nowrap' }}>{TIER_LABELS[limits.kyc_tier]}</span>
           </div>
-          <div className="stat-card">
-            <div className="stat-label">Daily limit</div>
-            <div className="stat-value" style={{ fontSize: '1.15rem' }}>GHS {limits.daily}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Monthly limit</div>
-            <div className="stat-value" style={{ fontSize: '1.15rem' }}>GHS {limits.monthly}</div>
-          </div>
+          {([
+            ['Today (last 24 hours)', limits.daily_used, limits.daily_limit],
+            ['This month (last 30 days)', limits.monthly_used, limits.monthly_limit],
+          ] as const).map(([label, used, max]) => {
+            const pct = Math.min(100, (parseFloat(used) / parseFloat(max)) * 100);
+            return (
+              <div key={label} style={{ marginBottom: '0.75rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '0.3rem' }}>
+                  <span>{label}</span>
+                  <span>{ghs(used)} of {ghs(max)}</span>
+                </div>
+                <div style={{ height: 6, borderRadius: 999, background: 'var(--border)', overflow: 'hidden' }}>
+                  <div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? 'var(--danger)' : 'var(--primary)' }} />
+                </div>
+              </div>
+            );
+          })}
+          <p className="text-muted" style={{ fontSize: '0.8rem' }}>
+            Counts money you pay into GlobePay: transfers, vault contributions, cards, cross-border and split-bill shares.
+            {limits.kyc_tier === 'unverified' && ' Verify your phone number below to raise your limits.'}
+            {limits.kyc_tier === 'phone_verified' && ' Verifying your ID raises them further - contact support.'}
+          </p>
         </div>
-        <div style={{ marginTop: '1rem', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-          Phone:{' '}
-          {isPhoneVerified ? (
-            <span className="badge badge-success">Verified</span>
-          ) : (
-            <span className="badge badge-pending">Not verified</span>
-          )}
-          <span style={{ marginLeft: '1rem' }}>
-            ID:{' '}
-            <span
-              className={`badge badge-${
-                kycStatus === 'approved' || kycStatus === 'verified'
-                  ? 'success'
-                  : kycStatus === 'rejected'
-                  ? 'failed'
-                  : 'pending'
-              }`}
-            >
-              {user?.kyc_status || 'none'}
-            </span>
-            {user?.kyc_rejection_reason && (
-              <span style={{ marginLeft: '0.5rem', color: 'var(--danger)' }}>
-                — {user.kyc_rejection_reason}
-              </span>
-            )}
-          </span>
-        </div>
-      </div>
+      )}
 
       <div className="card" style={{ marginBottom: '1rem' }}>
-        <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>1. Verify phone</h2>
+        <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>Verify phone</h2>
         <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-          Raises limits to GHS 5,000 / day · GHS 20,000 / month
+          Confirms this number is yours.
         </p>
         {isPhoneVerified ? (
-          <div className="alert alert-success" style={{ marginBottom: 0 }}>Phone already verified.</div>
+          <div className="alert alert-success" style={{ marginBottom: 0 }}>Phone verified.</div>
         ) : !codeSent ? (
           <button className="btn btn-primary" onClick={handleRequestPhoneCode} disabled={busy}>
             Send verification code
@@ -228,65 +209,35 @@ export default function Settings() {
       </div>
 
       <div className="card" style={{ marginBottom: '1rem' }}>
-        <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>2. Submit Ghana Card</h2>
-        <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-          After approval: GHS 20,000 / day · GHS 100,000 / month
-        </p>
-        {tierKey === 'id_verified' || kycStatus === 'approved' || kycStatus === 'verified' ? (
-          <div className="alert alert-success" style={{ marginBottom: 0 }}>ID verified.</div>
-        ) : kycStatus === 'pending' || kycStatus === 'submitted' ? (
-          <div className="alert alert-info" style={{ marginBottom: 0 }}>Under review.</div>
-        ) : (
-          <form onSubmit={handleSubmitId}>
-            <div className="form-group">
-              <label>Ghana Card number</label>
-              <input
-                value={ghanaCard}
-                onChange={(e) => setGhanaCard(e.target.value)}
-                placeholder="GHA-XXXXXXXXX-X"
-                required
-              />
-            </div>
-            <button type="submit" className="btn btn-primary" disabled={busy || !isPhoneVerified}>
-              Submit for verification
-            </button>
-            {!isPhoneVerified && (
-              <p style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--warning)' }}>
-                Verify phone first.
-              </p>
-            )}
-          </form>
-        )}
-      </div>
-
-      <div className="card" style={{ marginBottom: '1rem' }}>
         <h2 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>Default payout (MoMo)</h2>
         <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
           Used when claiming transfers and withdrawing from vaults
         </p>
         <form onSubmit={handlePayout}>
           <div className="form-group">
-            <label>Mobile money number</label>
+            <label htmlFor="payout-number">Mobile money number</label>
             <input
+              id="payout-number"
               required
+              inputMode="tel"
               value={payout.momo_number}
               onChange={(e) => setPayout({ ...payout, momo_number: e.target.value })}
             />
           </div>
           <div className="form-group">
-            <label>Network</label>
+            <label htmlFor="payout-network">Network</label>
             <select
+              id="payout-network"
               value={payout.momo_bank_code}
               onChange={(e) => setPayout({ ...payout, momo_bank_code: e.target.value })}
             >
-              <option value="MTN">MTN</option>
-              <option value="ATL">AirtelTigo</option>
-              <option value="VOD">Vodafone</option>
+              {MOMO_NETWORKS.map((n) => <option key={n.code} value={n.code}>{n.label}</option>)}
             </select>
           </div>
           <div className="form-group">
-            <label>Account name</label>
+            <label htmlFor="payout-name">Account name</label>
             <input
+              id="payout-name"
               required
               value={payout.account_name}
               onChange={(e) => setPayout({ ...payout, account_name: e.target.value })}

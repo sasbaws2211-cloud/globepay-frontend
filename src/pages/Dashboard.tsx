@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { getWalletSummary, getTransfers, getVaults, getCards } from '../api/services';
+import { cardName, visibleCards } from '../utils/cards';
 import type { WalletSummary, Transfer, Vault, Card } from '../api/types';
 import { getErrorMessage } from '../api/client';
 
@@ -32,7 +33,7 @@ export default function Dashboard() {
       setSummary(s);
       setTransfers(t.slice(0, 5));
       setVaults(v.slice(0, 3));
-      setCards(c.slice(0, 3));
+      setCards(visibleCards(c).slice(0, 3));
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -165,13 +166,13 @@ export default function Dashboard() {
           <div className="grid grid-3">
             {cards.map((c) => (
               <div key={c.id} style={{ padding: '1rem', background: 'linear-gradient(135deg,#0f766e,#134e4a)', color: 'white', borderRadius: 12 }}>
-                <div style={{ fontSize: '0.8rem', opacity: 0.85 }}>{c.card_brand || 'Card'}</div>
+                <div style={{ fontSize: '0.8rem', opacity: 0.85 }}>{cardName(c)}</div>
                 <div style={{ fontFamily: 'monospace', letterSpacing: 2, margin: '0.5rem 0' }}>
                   {c.masked_pan || '•••• ••••'}
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
                   <span>{c.currency} {parseFloat(c.balance).toFixed(2)}</span>
-                  <span className="badge" style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}>{c.status}</span>
+                  <span className="badge" style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}>{c.status.replaceAll('_', ' ')}</span>
                 </div>
               </div>
             ))}
